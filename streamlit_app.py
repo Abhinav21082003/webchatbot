@@ -1,3 +1,4 @@
+import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import nltk
@@ -5,8 +6,9 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import random
 import string
-import streamlit as st
+import time  # For adding delays if needed
 
+# Download NLTK data
 nltk.download('punkt')
 nltk.download('wordnet')
 nltk.download('stopwords')
@@ -19,87 +21,123 @@ urls = [
 ]
 
 # Function to scrape text from a URL
+@st.cache_data(show_spinner=False)
 def scrape_text(url):
-    response = requests.get(url)
-    if response.status_code == 200:
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()  # Raise HTTPError for bad responses
         soup = BeautifulSoup(response.content, "html.parser")
-        return soup.get_text(separator=" ")
-    else:
-        st.error(f"Failed to scrape {url}")
+        # Extract text from paragraph tags
+        paragraphs = soup.find_all('p')
+        text = ' '.join([para.get_text() for para in paragraphs])
+        return text
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching {url}: {e}")
         return ""
 
 # Scrape and combine text from all URLs
-corpus_text = ""
-for url in urls:
-    corpus_text += scrape_text(url) + " "
+@st.cache_data(show_spinner=True)
+def build_corpus(urls):
+    corpus_text = ""
+    for url in urls:
+        text = scrape_text(url)
+        corpus_text += text + " "
+        time.sleep(1)  # Be polite and avoid overwhelming the server
+    return corpus_text
+
+corpus_text = build_corpus(urls)
+
+# Check if corpus_text is empty
+if not corpus_text.strip():
+    st.error("Failed to build the corpus from the provided URLs.")
+    st.stop()
 
 # Tokenize the text into sentences
 sent_tokens = nltk.sent_tokenize(corpus_text)
 
-# Initialize WordNet lemmatizer and stopwords
+# Initialize lemmatizer and stopwords
 lemmatizer = nltk.WordNetLemmatizer()
 stop_words = set(nltk.corpus.stopwords.words('english'))
 
-# Define functions for text normalization and lemmatization
+# Functions for text normalization and lemmatization
 def LemTokens(tokens):
     return [lemmatizer.lemmatize(token) for token in tokens]
 
 def LemNormalize(text):
     tokens = nltk.word_tokenize(text.lower())
-    tokens = [token for token in tokens if token not in string.punctuation and token not in stop_words]
+    tokens = [
+        token for token in tokens if token not in string.punctuation and token not in stop_words
+    ]
     return LemTokens(tokens)
 
 # Define TF-IDF vectorizer
 TfidfVec = TfidfVectorizer(tokenizer=LemNormalize, stop_words='english')
 
 # Define greeting inputs and responses
-GREETING_INPUTS = ("hello", "hi", "hey", "hola", "greetings", "what's up", "howdy", "yo", "hi there", "good day", "morning", "afternoon", "evening", "sup", "yo yo", "hey there", "nice to meet you", "hello there", "what's happening", "how's it going")
-GREETING_RESPONSES = ["Hello!", "Hi!", "Hey!", "Hola!", "Greetings!", "What's up?", "Howdy!", "Yo!", "Hi there!", "Good day!", "Good morning!", "Good afternoon!", "Good evening!", "Sup!", "Yo yo!", "Hey there!", "Nice to meet you!", "Hello there!", "Not much, you?", "It's going well, thanks!"]
+GREETING_INPUTS = (
+    "hello", "hi", "hey", "hola", "greetings", "what's up", "howdy",
+    "yo", "hi there", "good day", "morning", "afternoon", "evening",
+    "sup", "yo yo", "hey there", "nice to meet you", "hello there",
+    "what's happening", "how's it going"
+)
+GREETING_RESPONSES = [
+    "Hello!", "Hi!", "Hey!", "Hola!", "Greetings!", "What's up?",
+    "Howdy!", "Yo!", "Hi there!", "Good day!", "Good morning!",
+    "Good afternoon!", "Good evening!", "Sup!", "Yo yo!", "Hey there!",
+    "Nice to meet you!", "Hello there!", "Not much, you?",
+    "It's going well, thanks!"
+]
 
-# Define the greeting function
+# Greeting function
 def greeting(sentence):
-    for word in sentence.split():
-        if word.lower() in GREETING_INPUTS:
+    for word in sentence.lower().split():
+        if word in GREETING_INPUTS:
             return random.choice(GREETING_RESPONSES)
     return None
 
-# Define the response function
-def response(user_response):
+# Response generation function
+def generate_response(user_input):
+    user_input = user_input.lower()
     bot_response = ''
-    sent_tokens_copy = sent_tokens.copy()  # Preserve original sentences
-    sent_tokens_copy.append(user_response)
-    tfidf = TfidfVec.fit_transform(sent_tokens_copy)
-    vals = cosine_similarity(tfidf[-1], tfidf)
-    idx = vals.argsort()[0][-2]
+    sent_tokens.append(user_input)
+    tfidf = TfidfVec.fit_transform(sent_tokens)
+    vals = cosine_similarity(tfidf[-1], tfidf[:-1])
+    idx = vals.argsort()[0][-1]
     flat = vals.flatten()
     flat.sort()
-    req_tfidf = flat[-2]
+    req_tfidf = flat[-1]
     if req_tfidf == 0:
-        bot_response = "I'm sorry, I didn't understand that."
+        bot_response = "I'm sorry, I didn't understand that. Could you please rephrase?"
     else:
         bot_response = sent_tokens[idx]
+    sent_tokens.pop()  # Remove the user input from tokens
     return bot_response
 
 # Streamlit UI setup
-st.title("Chatbot")
-st.write("This is a simple chatbot application.")
+st.title("🗨️ Simple Chatbot")
+st.write("This chatbot provides information based on scraped Wikipedia articles.")
 
-# Chat history container
+# Initialize session state for chat history
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
 
-# Input field for user input
-user_input = st.text_input("You:", key="input")
+# Chat input
+user_input = st.text_input("You:", key="user_input")
 
-if st.button("Send"):
+if st.button("Send", key="send_button"):
     if user_input:
-        st.session_state.chat_history.append(f"You: {user_input}")
-        if greeting(user_input):
-            bot_response = greeting(user_input)
+        st.session_state.chat_history.append(("You", user_input))
+        greet_response = greeting(user_input)
+        if greet_response:
+            bot_response = greet_response
         else:
-            bot_response = response(user_input)
-        st.session_state.chat_history.append(f"BOT: {bot_response}")
+            bot_response = generate_response(user_input)
+        st.session_state.chat_history.append(("Bot", bot_response))
+        st.experimental_rerun()
 
 # Display chat history
-for chat in st.session_state.chat_history:
-    st.write(chat)
+for sender, message in st.session_state.chat_history:
+    if sender == "You":
+        st.markdown(f"**You:** {message}")
+    else:
+        st.markdown(f"**Bot:** {message}")
